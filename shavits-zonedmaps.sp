@@ -236,7 +236,7 @@ public void LoadAllMaps()
     }
 
     char query[512];
-    Format(query, sizeof(query), "SELECT map FROM `%smapzones` WHERE type=1 ORDER BY `map`", g_cMySQLPrefix);
+    Format(query, sizeof(query), "SELECT a.map FROM mapzones AS a WHERE a.track = 0 AND a.type = 0 AND EXISTS (SELECT 1 FROM mapzones AS b WHERE a.map = b.map AND b.track = 0 AND b.type = 1) ORDER BY a.map", g_cMySQLPrefix);
     g_hDatabase.Query(LoadZonedMapsCallback, query, _, DBPrio_High);
 }
 
