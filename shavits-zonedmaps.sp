@@ -63,29 +63,26 @@ public void OpenMapsMenu(int client, bool zoned)
         PrintToChat(client, "No map list found...");
         return;
     }
-
+    
     Menu menu = new Menu(MapsMenuHandler);
-	char buffer[512];
-	int i_mapsCount = 0;
-	
+    char buffer[512];
+    
     for (int i = 0; i < g_aAllMapsList.Length; i++)
     {
         g_aAllMapsList.GetString(i, buffer, sizeof(buffer));
         if (FindMap(buffer, buffer, sizeof(buffer)) == FindMap_NotFound)
             continue;
-
         // Convert map name to lowercase before checking
         char lowerMap[PLATFORM_MAX_PATH];
         StrToLowercase(buffer, sizeof(buffer), lowerMap);  // Use StrToLowercase here
-
         bool isZoned = g_aZonedMapsList.FindString(lowerMap) >= 0;
         if ((zoned && isZoned) || (!zoned && !isZoned))
         {
             menu.AddItem(buffer, buffer);
-            i_mapsCount++;
         }
     }
-
+    
+    int i_mapsCount = menu.ItemCount;
     Format(buffer, sizeof(buffer), "%s Maps (%d):\n", zoned ? "Zoned" : "Unzoned", i_mapsCount);
     menu.SetTitle(buffer);
     menu.Display(client, MENU_TIME_FOREVER);
