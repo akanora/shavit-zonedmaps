@@ -9,7 +9,7 @@ public Plugin myinfo =
     name = "shavit - Zoned Maps (Hybrid)",
     author = "SlidyBat + Hybrid HTTP Version by Nora",
     description = "Shows admins zoned/unzoned maps using DB and HTTP fallback",
-    version = "1.2",
+    version = "1.3",
     url = "",
 };
 
@@ -18,14 +18,26 @@ char g_cMySQLPrefix[32];
 
 ArrayList g_aAllMapsList;
 ArrayList g_aZonedMapsList;
+ArrayList g_aUnzonedMapsList;
 
 int g_iMapFileSerial = -1;
 bool g_bReadFromMapsFolder = true;
+
+// Cvar for HTTP fallback toggle
+ConVar g_cvHttpFallback;
+int g_iPendingHttpRequests = 0;
 
 public void OnPluginStart()
 {
     g_aAllMapsList = new ArrayList(ByteCountToCells(PLATFORM_MAX_PATH));
     g_aZonedMapsList = new ArrayList(ByteCountToCells(PLATFORM_MAX_PATH));
+    g_aUnzonedMapsList = new ArrayList(ByteCountToCells(PLATFORM_MAX_PATH));
+
+    // Create cvar for HTTP fallback toggle
+    g_cvHttpFallback = CreateConVar("sm_zonedmaps_http_fallback", "0", "Enable HTTP fallback for checking zoned maps (0 = database only, 1 = database + HTTP)", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+    
+    // Create config file
+    AutoExecConfig(true, "zonedmaps");
 
     RegAdminCmd("sm_zonedmaps", Command_ZonedMaps, ADMFLAG_CHANGEMAP);
     RegAdminCmd("sm_unzonedmaps", Command_UnzonedMaps, ADMFLAG_CHANGEMAP);
@@ -51,40 +63,30 @@ void StrToLowercase(const char[] input, int length, char[] output)
     output[i] = '\0';  // Null-terminate the string
 }
 
+
 public void OpenMapsMenu(int client, bool zoned)
 {
-    if (!g_aZonedMapsList.Length)
-    {
-        PrintToChat(client, "No zoned maps found...");
-        return;
-    }
-    else if (!zoned && !g_aAllMapsList.Length)
-    {
-        PrintToChat(client, "No map list found...");
-        return;
-    }
-    
-    Menu menu = new Menu(MapsMenuHandler);
     char buffer[512];
-    
-    for (int i = 0; i < g_aAllMapsList.Length; i++)
+    Menu menu = new Menu(MapsMenuHandler);
+
+    ArrayList targetList = zoned ? g_aZonedMapsList : g_aUnzonedMapsList;
+
+    if (!targetList.Length)
     {
-        g_aAllMapsList.GetString(i, buffer, sizeof(buffer));
-        if (FindMap(buffer, buffer, sizeof(buffer)) == FindMap_NotFound)
-            continue;
-        // Convert map name to lowercase before checking
-        char lowerMap[PLATFORM_MAX_PATH];
-        StrToLowercase(buffer, sizeof(buffer), lowerMap);  // Use StrToLowercase here
-        bool isZoned = g_aZonedMapsList.FindString(lowerMap) >= 0;
-        if ((zoned && isZoned) || (!zoned && !isZoned))
-        {
-            menu.AddItem(buffer, buffer);
-        }
+        PrintToChat(client, zoned ? "No zoned maps found..." : "No unzoned maps found...");
+        return;
     }
-    
+
+    for (int i = 0; i < targetList.Length; i++)
+    {
+        targetList.GetString(i, buffer, sizeof(buffer));
+        menu.AddItem(buffer, buffer);
+    }
+
     int i_mapsCount = menu.ItemCount;
     Format(buffer, sizeof(buffer), "%s Maps (%d):\n", zoned ? "Zoned" : "Unzoned", i_mapsCount);
     menu.SetTitle(buffer);
+
     menu.Display(client, MENU_TIME_FOREVER);
 }
 
@@ -119,6 +121,7 @@ public int MapsMenuHandler(Menu menu, MenuAction action, int param1, int param2)
     {
         delete menu;
     }
+    return 0;
 }
 
 public void OpenChangeMapMenu(int client, char[] map)
@@ -147,6 +150,7 @@ public int ChangeMapMenuHandler(Menu menu, MenuAction action, int param1, int pa
     {
         delete menu;
     }
+    return 0;
 }
 
 public void LoadZonedMapsCallback(Database db, DBResultSet results, const char[] error, any data)
@@ -169,35 +173,61 @@ public void LoadZonedMapsCallback(Database db, DBResultSet results, const char[]
         g_aZonedMapsList.PushString(lowerMap);
     }
 
-    // Check HTTP fallback for unlisted maps
-    for (int i = 0; i < g_aAllMapsList.Length; i++)
+    // Check HTTP fallback only if enabled
+    if (g_cvHttpFallback.BoolValue)
     {
-        char map[PLATFORM_MAX_PATH];
-        g_aAllMapsList.GetString(i, map, sizeof(map));
-
-        // Convert map name to lowercase before checking HTTP
-        char lowerMap[PLATFORM_MAX_PATH];
-        StrToLowercase(map, sizeof(map), lowerMap);  // Use StrToLowercase here
-
-        if (g_aZonedMapsList.FindString(lowerMap) < 0)
+        g_iPendingHttpRequests = 0;
+        
+        // Check HTTP fallback for unlisted maps
+        for (int i = 0; i < g_aAllMapsList.Length; i++)
         {
-            char url[256];
-            Format(url, sizeof(url), "http://zones-cstrike.srcwr.com/z/%s.json", map);
-            Handle hRequest = SteamWorks_CreateHTTPRequest(k_EHTTPMethodGET, url);
-            if (hRequest != INVALID_HANDLE)
+            char map[PLATFORM_MAX_PATH];
+            g_aAllMapsList.GetString(i, map, sizeof(map));
+
+            // Convert map name to lowercase before checking HTTP
+            char lowerMap[PLATFORM_MAX_PATH];
+            StrToLowercase(map, sizeof(map), lowerMap);  // Use StrToLowercase here
+
+            if (g_aZonedMapsList.FindString(lowerMap) < 0)
             {
-                SteamWorks_SetHTTPRequestContextValue(hRequest, i);
-                SteamWorks_SetHTTPCallbacks(hRequest, OnHTTPZoneCheck);
-                SteamWorks_SendHTTPRequest(hRequest);
+                char url[256];
+                Format(url, sizeof(url), "http://zones-cstrike.srcwr.com/z/%s.json", map);
+                Handle hRequest = SteamWorks_CreateHTTPRequest(k_EHTTPMethodGET, url);
+                if (hRequest != INVALID_HANDLE)
+                {
+                    SteamWorks_SetHTTPRequestContextValue(hRequest, i);
+                    SteamWorks_SetHTTPCallbacks(hRequest, OnHTTPZoneCheck);
+                    SteamWorks_SendHTTPRequest(hRequest);
+                    g_iPendingHttpRequests++;
+                }
             }
         }
+        
+        if (g_iPendingHttpRequests > 0)
+        {
+            PrintToServer("[ZonedMaps] HTTP fallback enabled - checking %d maps via HTTP", g_iPendingHttpRequests);
+        }
     }
+    else
+    {
+        PrintToServer("[ZonedMaps] HTTP fallback disabled - using database only");
+    }
+
+    CacheUnzonedMaps();
 }
 
 public void OnHTTPZoneCheck(Handle request, bool failure, bool success, EHTTPStatusCode statusCode, any index)
 {
+    g_iPendingHttpRequests--;
+    
     if (!success || failure || statusCode != k_EHTTPStatusCode200OK)
+    {
+        if (g_iPendingHttpRequests == 0)
+        {
+            PrintToServer("[ZonedMaps] HTTP fallback check completed");
+        }
         return;
+    }
 
     char map[PLATFORM_MAX_PATH];
     g_aAllMapsList.GetString(index, map, sizeof(map));
@@ -209,6 +239,12 @@ public void OnHTTPZoneCheck(Handle request, bool failure, bool success, EHTTPSta
     if (g_aZonedMapsList.FindString(lowerMap) < 0)
     {
         g_aZonedMapsList.PushString(lowerMap);
+        PrintToServer("[ZonedMaps] Found zoned map via HTTP: %s", map);
+    }
+    
+    if (g_iPendingHttpRequests == 0)
+    {
+        PrintToServer("[ZonedMaps] HTTP fallback check completed");
     }
 }
 
@@ -290,4 +326,28 @@ public Action Timer_ChangeMap(Handle timer, DataPack data)
     data.ReadString(map, sizeof(map));
     SetNextMap(map);
     ForceChangeLevel(map, "RTV Mapvote");
+
+    return Plugin_Handled;
+}
+
+void CacheUnzonedMaps()
+{
+    g_aUnzonedMapsList.Clear();
+
+    char buffer[PLATFORM_MAX_PATH];
+    for (int i = 0; i < g_aAllMapsList.Length; i++)
+    {
+        g_aAllMapsList.GetString(i, buffer, sizeof(buffer));
+        if (FindMap(buffer, buffer, sizeof(buffer)) == FindMap_NotFound)
+            continue;
+
+        char lowerMap[PLATFORM_MAX_PATH];
+        StrToLowercase(buffer, sizeof(buffer), lowerMap);
+
+        bool isZoned = g_aZonedMapsList.FindString(lowerMap) >= 0;
+        if (!isZoned)
+        {
+            g_aUnzonedMapsList.PushString(buffer);
+        }
+    }
 }
